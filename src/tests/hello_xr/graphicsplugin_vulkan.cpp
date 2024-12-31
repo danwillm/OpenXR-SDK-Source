@@ -1284,7 +1284,7 @@ void Swapchain::Present(VkQueue queue, VkSemaphore drawComplete) {
 
 struct VulkanGraphicsPlugin : public IGraphicsPlugin {
     VulkanGraphicsPlugin(const std::shared_ptr<Options>& options, std::shared_ptr<IPlatformPlugin> /*unused*/)
-        : m_clearColor(options->GetBackgroundClearColor()) {
+        : m_clearColor(options->GetBackgroundClearColor()), m_viewConfigurationType(options->Parsed.ViewConfigType) {
         m_graphicsBinding.type = GetGraphicsBindingType();
     };
 
@@ -1474,7 +1474,7 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
 
         m_memAllocator.Init(m_vkPhysicalDevice, m_vkDevice);
 
-        InitializeResources();
+        InitializeResources(instance, systemId);
 
         m_graphicsBinding.instance = m_vkInstance;
         m_graphicsBinding.physicalDevice = m_vkPhysicalDevice;
@@ -1502,16 +1502,18 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
     }
 #endif
 
-    void InitializeResources() {
+    void InitializeResources(XrInstance instance, XrSystemId systemId) {
 #ifdef USE_ONLINE_VULKAN_SHADERC
         auto vertexSPIRV = CompileGlslShader("vertex", shaderc_glsl_default_vertex_shader, VertexShaderGlsl);
         auto fragmentSPIRV = CompileGlslShader("fragment", shaderc_glsl_default_fragment_shader, FragmentShaderGlsl);
 #else
         std::vector<uint32_t> vertexSPIRV = SPV_PREFIX
 #include "vert.spv"
+
             SPV_SUFFIX;
         std::vector<uint32_t> fragmentSPIRV = SPV_PREFIX
 #include "frag.spv"
+
             SPV_SUFFIX;
 #endif
         if (vertexSPIRV.empty()) THROW("Failed to compile vertex shader");
@@ -1526,7 +1528,14 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
         CHECK_VKCMD(vkCreateSemaphore(m_vkDevice, &semInfo, nullptr, &m_vkDrawDone));
         CHECK_VKCMD(m_namer.SetName(VK_OBJECT_TYPE_SEMAPHORE, (uint64_t)m_vkDrawDone, "hello_xr draw done semaphore"));
 
-        if (!m_cmdBuffer.Init(m_namer, m_vkDevice, m_queueFamilyIndex)) THROW("Failed to create command buffer");
+        uint32_t viewCount = 0;
+        CHECK_XRCMD(xrEnumerateViewConfigurationViews(instance, systemId, m_viewConfigurationType, 0, &viewCount, nullptr));
+
+        m_viewCmdBuffers = std::vector<CmdBuffer>(viewCount);
+
+        for (auto& cmdBuffer : m_viewCmdBuffers) {
+            if (!cmdBuffer.Init(m_namer, m_vkDevice, m_queueFamilyIndex)) THROW("Failed to create command buffer");
+        }
 
         m_pipelineLayout.Create(m_vkDevice);
 
@@ -1543,12 +1552,14 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
 #if defined(USE_MIRROR_WINDOW)
         m_swapchain.Create(m_vkInstance, m_vkPhysicalDevice, m_vkDevice, m_graphicsBinding.queueFamilyIndex);
 
-        m_cmdBuffer.Reset();
-        m_cmdBuffer.Begin();
-        m_swapchain.Prepare(m_cmdBuffer.buf);
-        m_cmdBuffer.End();
-        m_cmdBuffer.Exec(m_vkQueue);
-        m_cmdBuffer.Wait();
+        for (CmdBuffer& cmdBuffer : m_viewCmdBuffers) {
+            cmdBuffer.Reset();
+            cmdBuffer.Begin();
+            m_swapchain.Prepare(cmdBuffer.buf);
+            cmdBuffer.End();
+            cmdBuffer.Exec(m_vkQueue);
+            cmdBuffer.Wait();
+        }
 #endif
     }
 
@@ -1591,19 +1602,21 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
     }
 
     void RenderView(const XrCompositionLayerProjectionView& layerView, const XrSwapchainImageBaseHeader* swapchainImage,
-                    int64_t /*swapchainFormat*/, const std::vector<Cube>& cubes) override {
+                    int64_t /*swapchainFormat*/, uint32_t viewIndex, const std::vector<Cube>& cubes) override {
         CHECK(layerView.subImage.imageArrayIndex == 0);  // Texture arrays not supported.
 
         auto swapchainContext = m_swapchainImageContextMap[swapchainImage];
         uint32_t imageIndex = swapchainContext->ImageIndex(swapchainImage);
 
+        CmdBuffer& cmdBuffer = m_viewCmdBuffers[viewIndex];
+
         // XXX Should double-buffer the command buffers, for now just flush
-        m_cmdBuffer.Wait();
-        m_cmdBuffer.Reset();
-        m_cmdBuffer.Begin();
+        cmdBuffer.Wait();
+        cmdBuffer.Reset();
+        cmdBuffer.Begin();
 
         // Ensure depth is in the right layout
-        swapchainContext->depthBuffer.TransitionLayout(&m_cmdBuffer, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        swapchainContext->depthBuffer.TransitionLayout(&cmdBuffer, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
         // Bind and clear eye render target
         static std::array<VkClearValue, 2> clearValues;
@@ -1619,14 +1632,14 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
 
         swapchainContext->BindRenderTarget(imageIndex, &renderPassBeginInfo);
 
-        vkCmdBeginRenderPass(m_cmdBuffer.buf, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdBeginRenderPass(cmdBuffer.buf, &renderPassBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
 
-        vkCmdBindPipeline(m_cmdBuffer.buf, VK_PIPELINE_BIND_POINT_GRAPHICS, swapchainContext->pipe.pipe);
+        vkCmdBindPipeline(cmdBuffer.buf, VK_PIPELINE_BIND_POINT_GRAPHICS, swapchainContext->pipe.pipe);
 
         // Bind index and vertex buffers
-        vkCmdBindIndexBuffer(m_cmdBuffer.buf, m_drawBuffer.idxBuf, 0, VK_INDEX_TYPE_UINT16);
+        vkCmdBindIndexBuffer(cmdBuffer.buf, m_drawBuffer.idxBuf, 0, VK_INDEX_TYPE_UINT16);
         VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(m_cmdBuffer.buf, 0, 1, &m_drawBuffer.vtxBuf, &offset);
+        vkCmdBindVertexBuffers(cmdBuffer.buf, 0, 1, &m_drawBuffer.vtxBuf, &offset);
 
         // Compute the view-projection transform.
         // Note all matrixes (including OpenXR's) are column-major, right-handed.
@@ -1647,20 +1660,20 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
             XrMatrix4x4f_CreateTranslationRotationScale(&model, &cube.Pose.position, &cube.Pose.orientation, &cube.Scale);
             XrMatrix4x4f mvp;
             XrMatrix4x4f_Multiply(&mvp, &vp, &model);
-            vkCmdPushConstants(m_cmdBuffer.buf, m_pipelineLayout.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(mvp.m), &mvp.m[0]);
+            vkCmdPushConstants(cmdBuffer.buf, m_pipelineLayout.layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(mvp.m), &mvp.m[0]);
 
             // Draw the cube.
-            vkCmdDrawIndexed(m_cmdBuffer.buf, m_drawBuffer.count.idx, 1, 0, 0, 0);
+            vkCmdDrawIndexed(cmdBuffer.buf, m_drawBuffer.count.idx, 1, 0, 0, 0);
         }
 
-        vkCmdEndRenderPass(m_cmdBuffer.buf);
+        vkCmdEndRenderPass(cmdBuffer.buf);
 
-        m_cmdBuffer.End();
-        m_cmdBuffer.Exec(m_vkQueue);
+        cmdBuffer.End();
+        cmdBuffer.Exec(m_vkQueue);
 
 #if defined(USE_MIRROR_WINDOW)
         // Cycle the window's swapchain on the last view rendered
-        if (swapchainContext == &m_swapchainImageContexts.back()) {
+        if (viewIndex == 0 && swapchainContext == &m_swapchainImageContexts.back()) {
             m_swapchain.Acquire();
             m_swapchain.Wait();
             m_swapchain.Present(m_vkQueue);
@@ -1670,7 +1683,10 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
 
     uint32_t GetSupportedSwapchainSampleCount(const XrViewConfigurationView&) override { return VK_SAMPLE_COUNT_1_BIT; }
 
-    void UpdateOptions(const std::shared_ptr<Options>& options) override { m_clearColor = options->GetBackgroundClearColor(); }
+    void UpdateOptions(const std::shared_ptr<Options>& options) override {
+        m_clearColor = options->GetBackgroundClearColor();
+        m_viewConfigurationType = options->Parsed.ViewConfigType;
+    }
 
    protected:
     XrGraphicsBindingVulkan2KHR m_graphicsBinding{XR_TYPE_GRAPHICS_BINDING_VULKAN2_KHR};
@@ -1687,10 +1703,12 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
 
     MemoryAllocator m_memAllocator{};
     ShaderProgram m_shaderProgram{};
-    CmdBuffer m_cmdBuffer{};
+    std::vector<CmdBuffer> m_viewCmdBuffers{};
+
     PipelineLayout m_pipelineLayout{};
     VertexBuffer<Geometry::Vertex> m_drawBuffer{};
     std::array<float, 4> m_clearColor;
+    XrViewConfigurationType m_viewConfigurationType;
 
 #if defined(USE_MIRROR_WINDOW)
     Swapchain m_swapchain{};
