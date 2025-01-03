@@ -183,7 +183,7 @@ struct MetalGraphicsPlugin : public IGraphicsPlugin {
     }
 
     void RenderView(const XrCompositionLayerProjectionView& layerView, const XrSwapchainImageBaseHeader* swapchainImage,
-                    int64_t swapchainFormat, const std::vector<Cube>& cubes) override {
+                    int64_t swapchainFormat, uint32_t /* viewIndex */, const std::vector<Cube>& cubes) override {
         auto pAutoReleasePool = NS::TransferPtr(NS::AutoreleasePool::alloc()->init());
 
         SwapchainContext& swapchainContext = m_swapchainContextMap[swapchainImage];
