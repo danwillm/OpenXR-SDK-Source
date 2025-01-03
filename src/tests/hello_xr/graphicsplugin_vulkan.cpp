@@ -1673,7 +1673,7 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
 
 #if defined(USE_MIRROR_WINDOW)
         // Cycle the window's swapchain on the last view rendered
-        if (viewIndex == 0 && swapchainContext == &m_swapchainImageContexts.back()) {
+        if (swapchainContext == &m_swapchainImageContexts.back()) {
             m_swapchain.Acquire();
             m_swapchain.Wait();
             m_swapchain.Present(m_vkQueue);
