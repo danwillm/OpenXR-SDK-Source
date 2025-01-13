@@ -34,6 +34,8 @@ struct IGraphicsPlugin {
     virtual void RenderView(const XrCompositionLayerProjectionView& layerView, const XrSwapchainImageBaseHeader* swapchainImage,
                             int64_t swapchainFormat, uint32_t viewIndex, const std::vector<Cube>& cubes) = 0;
 
+    virtual void RenderComplete() {};
+
     // Get recommended number of sub-data element samples in view (recommendedSwapchainSampleCount)
     // if supported by the graphics plugin. A supported value otherwise.
     virtual uint32_t GetSupportedSwapchainSampleCount(const XrViewConfigurationView& view) {

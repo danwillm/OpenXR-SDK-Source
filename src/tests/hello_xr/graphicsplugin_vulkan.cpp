@@ -104,6 +104,8 @@ inline VkResult CheckVkResult(VkResult res, const char* originator = nullptr, co
 #define CHECK_VKCMD(cmd) CheckVkResult(cmd, #cmd, FILE_AND_LINE);
 #define CHECK_VKRESULT(res, cmdStr) CheckVkResult(res, cmdStr, FILE_AND_LINE);
 
+#define MAX_FRAMES_IN_FLIGHT 2
+
 #ifdef USE_ONLINE_VULKAN_SHADERC
 constexpr char VertexShaderGlsl[] =
     R"_(
@@ -1531,10 +1533,11 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
         uint32_t viewCount = 0;
         CHECK_XRCMD(xrEnumerateViewConfigurationViews(instance, systemId, m_viewConfigurationType, 0, &viewCount, nullptr));
 
-        m_viewCmdBuffers = std::vector<CmdBuffer>(viewCount);
-
-        for (auto& cmdBuffer : m_viewCmdBuffers) {
-            if (!cmdBuffer.Init(m_namer, m_vkDevice, m_queueFamilyIndex)) THROW("Failed to create command buffer");
+        for(auto& viewCmdBuffers : m_viewCmdBuffers) {
+            viewCmdBuffers = std::vector<CmdBuffer>(viewCount);
+            for (auto& cmdBuffer : viewCmdBuffers) {
+                if (!cmdBuffer.Init(m_namer, m_vkDevice, m_queueFamilyIndex)) THROW("Failed to create command buffer");
+            }
         }
 
         m_pipelineLayout.Create(m_vkDevice);
@@ -1551,15 +1554,6 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
 
 #if defined(USE_MIRROR_WINDOW)
         m_swapchain.Create(m_vkInstance, m_vkPhysicalDevice, m_vkDevice, m_graphicsBinding.queueFamilyIndex);
-
-        for (CmdBuffer& cmdBuffer : m_viewCmdBuffers) {
-            cmdBuffer.Reset();
-            cmdBuffer.Begin();
-            m_swapchain.Prepare(cmdBuffer.buf);
-            cmdBuffer.End();
-            cmdBuffer.Exec(m_vkQueue);
-            cmdBuffer.Wait();
-        }
 #endif
     }
 
@@ -1608,7 +1602,7 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
         auto swapchainContext = m_swapchainImageContextMap[swapchainImage];
         uint32_t imageIndex = swapchainContext->ImageIndex(swapchainImage);
 
-        CmdBuffer& cmdBuffer = m_viewCmdBuffers[viewIndex];
+        CmdBuffer& cmdBuffer = m_viewCmdBuffers[m_currentFrame][viewIndex];
 
         // XXX Should double-buffer the command buffers, for now just flush
         cmdBuffer.Wait();
@@ -1681,6 +1675,10 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
 #endif
     }
 
+    void RenderComplete() override {
+        m_currentFrame = (m_currentFrame + 1) % MAX_FRAMES_IN_FLIGHT;
+    }
+
     uint32_t GetSupportedSwapchainSampleCount(const XrViewConfigurationView&) override { return VK_SAMPLE_COUNT_1_BIT; }
 
     void UpdateOptions(const std::shared_ptr<Options>& options) override {
@@ -1703,7 +1701,9 @@ struct VulkanGraphicsPlugin : public IGraphicsPlugin {
 
     MemoryAllocator m_memAllocator{};
     ShaderProgram m_shaderProgram{};
-    std::vector<CmdBuffer> m_viewCmdBuffers{};
+
+    uint32_t m_currentFrame = 0;
+    std::array<std::vector<CmdBuffer>, MAX_FRAMES_IN_FLIGHT> m_viewCmdBuffers{};
 
     PipelineLayout m_pipelineLayout{};
     VertexBuffer<Geometry::Vertex> m_drawBuffer{};

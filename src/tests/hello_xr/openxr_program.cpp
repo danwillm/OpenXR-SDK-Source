@@ -982,6 +982,7 @@ struct OpenXrProgram : IOpenXrProgram {
             XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
             CHECK_XRCMD(xrReleaseSwapchainImage(viewSwapchain.handle, &releaseInfo));
         }
+        m_graphicsPlugin->RenderComplete();
 
         layer.space = m_appSpace;
         layer.layerFlags =
